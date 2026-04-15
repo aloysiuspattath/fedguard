@@ -1,47 +1,65 @@
+# FedGuard Windows Resource Monitor (JScript + Batch)
 
-# Windows Resource Collector (JScript + Batch)
+A lightweight, purely native Windows monitoring agent that tracks CPU, Memory, and Disk usage via WMI (Windows Management Instrumentation) and produces SQL `INSERT` statements to push telemetry to an Oracle Database.
 
-This bundle produces SQL `INSERT` statements for:
-- **Disk usage** per logical drive -> `disk_usage` table (GB values rounded to **1 decimal**)
-- **System resource** (CPU %, Memory % used) -> `SYSTEM_RESOURCE` table (averaged over **N samples** and rounded to **1 decimal**)
+**Key Feature:** Completely independent of PowerShell or external executable dependencies. It runs autonomously via native Windows Script Host.
 
-All outputs are appended to `system_resource_disk.sql`.
+## Core Features
 
-## Files
-- `usage_gb_sql.js` — emits `INSERT INTO disk_usage ...` per drive (1-decimal GB).
-- `system_resource_sql.js` — emits one `INSERT INTO SYSTEM_RESOURCE ...` with **averaged** CPU and memory (%).
-- `resource_and_disk_sql.js` — optional single JScript that outputs both disk and system inserts in one run.
-- `run_all_bat_with_error_handling.txt` — batch wrapper to orchestrate and append all SQL lines.
+1. **Telemetry Generation**: Averages CPU and RAM over a polling window. Reads active Disk partitions seamlessly. 
+2. **True IPv4 Discovery**: Intelligently bypasses link-local (169.254.x.x) addresses and gracefully discovers the primary server IP.
+3. **Autonomous Active Alerts**: Features an intelligent threshold limit switch. When hardware limitations are breached, it automatically fires advanced WMI queries to identify the highest consuming runaway process (like `chrome.exe` eating up CPU or Disk I/O) and isolates the violation into an independent `PROCESS_ALERTS` logging table.
+4. **Resiliency**: Hardened with deep `try/catch` enclosures to ensure a single malfunctioning hardware WMI performance counter will not crash the telemetry logging for the whole agent.
 
-## Sampling & Rounding
-- **CPU/Memory averaging**: scripts sample values every second and average over `sampleCount` readings.
-  - `system_resource_sql.js` arg3 = `sampleCount` (default **10**). Use `5` for quicker runs.
-  - `resource_and_disk_sql.js` arg4 = `sampleCount` (default **10**).
-- **Rounding**:
-  - Disk sizes: total/free/used in GB rounded to **1 decimal**.
-  - CPU/Memory percentages: averaged then rounded to **1 decimal**.
+## Components
+
+- `gen.BAT`: Main entry point that primes Oracle log rotations and configures the environment.
+- `run_all.bat`: The orchestrator that configures the agent thresholds and calls the JS payload.
+- `resource_and_disk_sql.JS`: The core unified operational logic payload that queries WMI.
+
+## Configuration Engine
+
+You can deeply customize the agent behavior entirely without coding.
+
+### 1. Alert Thresholds (`run_all.bat`)
+At the top of `run_all.bat` you can specify alert triggers:
+- `CPU_THRESHOLD=80`: Warn if averaged CPU % goes above 80 
+- `MEM_THRESHOLD=85`: Warn if RAM working set usage pushes over 85%
+- `DISK_THRESHOLD=90`: Warn if a logical drive's physical capacity is >90% documented
+- `ENABLE_DISK_IO_ALERT=1`: Active process Disk I/O tracking toggle.
+
+### 2. SQL Table Schemas (`resource_and_disk_sql.JS`)
+At the immediate top of the JS file itself contains a SQL Configuration module allowing you to change Oracle Table bindings.
+
+```javascript
+// 1. Disk Usage Table
+var TBL_DISK = "disk_usage";
+var COL_DISK = "timestamp, ip_address, mount_point, total_size_gb, free_gb, used_gb, used_percent";
+
+// 2. System Resource Table (CPU/Memory)
+var TBL_SYS  = "monitor.system_resource";
+var COL_SYS  = "timestamp, ip_address, cpu, memory";
+
+// 3. Process Alerts Table (High Usage tracking)
+var TBL_ALRT = "PROCESS_ALERTS";
+var COL_ALRT = "timestamp, ip_address, alert_type, process_name, metric_value";
+```
+
+## Oracle Dependencies
+
+The Oracle DB must have the `PROCESS_ALERTS` table instantiated to receive the advanced process metrics:
+```sql
+CREATE TABLE PROCESS_ALERTS (
+   timestamp DATE,
+   ip_address VARCHAR(45),
+   alert_type VARCHAR(50), 
+   process_name VARCHAR(255),
+   metric_value VARCHAR(50)
+);
+```
 
 ## Usage
-1. Place all files in the same folder.
-2. Run the batch wrapper:
-   ```bat
-   run_all_bat_with_error_handling.txt
-   ```
-   Set `SAMPLE_COUNT=5` at the top of the file if you want a faster 5-second average.
 
-3. Run JScript directly (examples):
-   ```bat
-   cscript //nologo system_resource_sql.js "04-12-2025 10:34:40" "10.251.9.72" 10
-   cscript //nologo usage_gb_sql.js "04-12-2025 10:34:40" "10.251.9.72" 3
-   cscript //nologo resource_and_disk_sql.js "04-12-2025 10:34:40" "10.251.9.72" 3 10
-   ```
-
-## Output Example
-```
-INSERT INTO disk_usage (timestamp, ip_address, mount_point, total_size_gb, free_gb, used_gb, used_percent) VALUES (TO_DATE('04-12-2025 10:34:40','DD-MM-YYYY HH24:MI:SS'), '10.251.9.72', 'C:', 99.1, 20.4, 78.7, 79);
-INSERT INTO SYSTEM_RESOURCE (timestamp, ip_address, cpu, memory) VALUES (TO_DATE('04-12-2025 10:34:40','DD-MM-YYYY HH24:MI:SS'), '10.251.9.72', 4.8, 42.1);
-```
-
-## Notes
-- Uses WMI classes: `Win32_LogicalDisk`, `Win32_OperatingSystem`, `Win32_PerfFormattedData_PerfOS_Processor`.
-- If performance counters are disabled, CPU might read 0; enable perf counters if needed.
+1. Modify configurations in `run_all.bat`. 
+2. Double-click or execute `gen.BAT`.
+3. Agent outputs are securely flushed and safely appended in `system_resource_disk.sql`.
