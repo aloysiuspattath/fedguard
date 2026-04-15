@@ -1,0 +1,9 @@
+# Local run logs
+logs/
+execution.log
+
+# Dynamically generated SQL outputs
+system_resource_disk.sql
+
+# Archives
+*.zip
