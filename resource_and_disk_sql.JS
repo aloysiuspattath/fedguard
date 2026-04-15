@@ -199,7 +199,7 @@ var COL_ALRT = "timestamp, ip_address, alert_type, process_name, metric_value";
             for (var k = 0; k < topProcs.length; k++) {
                 var topP = topProcs[k];
                 var sqlAlert = "INSERT INTO " + TBL_ALRT + " (" + COL_ALRT + ") VALUES " +
-                  "(TO_DATE('" + ts + "','DD-MM-YYYY HH24:MI:SS'), '" + ip + "', 'DISK_IO_ON_" + dev + "', '" + topP.name + "', '" + topP.value + "');";
+                  "(TO_DATE('" + ts + "','DD-MM-YYYY HH24:MI:SS'), '" + ip + "', 'GLOBAL_TOP_DISK_IO', '" + topP.name + "', '" + topP.value + "');";
                 WScript.Echo(sqlAlert);
             }
         }
