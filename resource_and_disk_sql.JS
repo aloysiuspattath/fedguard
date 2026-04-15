@@ -46,6 +46,14 @@ var COL_ALRT = "timestamp, ip_address, alert_type, process_name, metric_value";
              pad(d.getHours()) + ":" + pad(d.getMinutes()) + ":" + pad(d.getSeconds());
   }
 
+  var svc;
+  try {
+      svc = GetObject("winmgmts:\\\\.\\root\\cimv2");
+  } catch (e) {
+      WScript.Echo("-- ERROR: Could not connect to WMI root\\cimv2. " + e.message);
+      WScript.Quit(1);
+  }
+
   function getLocalIP(svc) {
       try {
           var adapters = svc.ExecQuery("SELECT IPAddress, DefaultIPGateway FROM Win32_NetworkAdapterConfiguration WHERE IPEnabled = True");
@@ -71,51 +79,90 @@ var COL_ALRT = "timestamp, ip_address, alert_type, process_name, metric_value";
       return "0.0.0.0";
   }
 
-  // --- Fetch Highest Consumer Process ---
-  function getTopProcess(svc, type) {
+  var logicalProcs = 1;
+  try {
+      var cs = svc.ExecQuery("SELECT NumberOfLogicalProcessors FROM Win32_ComputerSystem");
+      var eCs = new Enumerator(cs);
+      if (!eCs.atEnd()) {
+          logicalProcs = Number(eCs.item().NumberOfLogicalProcessors) || 1;
+      }
+  } catch(e) {}
+
+  var totalMemBytes = 1;
+  try {
+      var osSet = svc.ExecQuery("SELECT TotalVisibleMemorySize FROM Win32_OperatingSystem");
+      var eOs = new Enumerator(osSet);
+      if (!eOs.atEnd()) {
+          totalMemBytes = Number(eOs.item().TotalVisibleMemorySize) * 1024 || 1;
+      }
+  } catch(e) {}
+
+  // --- Fetch Highest Consumer Processes ---
+  function getTopProcess(svc, type, limit) {
+      if (!limit) limit = 1; // Default to top 1
       try {
           var perf = svc.ExecQuery("SELECT Name, PercentProcessorTime, WorkingSetPrivate, IODataBytesPersec FROM Win32_PerfFormattedData_PerfProc_Process");
           var eProc = new Enumerator(perf);
-          var topName = "Unknown";
-          var topVal = -1;
+          var agg = {};
 
           for (; !eProc.atEnd(); eProc.moveNext()) {
               var p = eProc.item();
-              var name = String(p.Name || "");
-              if (name === "_Total" || name === "Idle") continue;
+              var rawName = String(p.Name || "");
+              if (rawName === "_Total" || rawName === "Idle") continue;
 
-              var val = 0;
-              if (type === "CPU") val = Number(p.PercentProcessorTime);
-              else if (type === "MEMORY") val = Number(p.WorkingSetPrivate);
-              else if (type === "DISK") val = Number(p.IODataBytesPersec);
+              // Group instances like "brave#1" -> "brave" to match Task Manager
+              var name = rawName;
+              var hashIdx = name.indexOf("#");
+              if (hashIdx > 0) name = name.substring(0, hashIdx);
 
-              if (isFinite(val) && val > topVal) {
-                  topVal = val;
-                  topName = name;
+              var rawVal = 0;
+              if (type === "CPU") rawVal = Number(p.PercentProcessorTime);
+              else if (type === "MEMORY") rawVal = Number(p.WorkingSetPrivate);
+              else if (type === "DISK") rawVal = Number(p.IODataBytesPersec);
+
+              if (isFinite(rawVal) && rawVal > 0) {
+                  if (!agg[name]) agg[name] = 0;
+                  agg[name] += rawVal;
               }
           }
           
-          if (topVal > 0 || type === "MEMORY") {
-             var formattedVal = String(topVal);
-             if (type === "MEMORY") formattedVal = Math.round(topVal / (1024*1024)) + " MB";
-             else if (type === "DISK") formattedVal = Math.round(topVal / 1024) + " KB/s I/O";
-             else if (type === "CPU") formattedVal = topVal + "%";
-             
-             return { name: topName, value: formattedVal };
+          var procs = [];
+          for (var key in agg) {
+              var rawTotal = agg[key];
+              var displayVal = 0;
+              var formattedVal = "";
+              
+              if (type === "CPU") {
+                  displayVal = Math.round(rawTotal / logicalProcs);
+                  if (displayVal <= 0) continue;
+                  formattedVal = displayVal + "%";
+              } else if (type === "MEMORY") {
+                  displayVal = Math.round((rawTotal / totalMemBytes) * 1000) / 10;
+                  formattedVal = displayVal + "%";
+              } else if (type === "DISK") {
+                  displayVal = rawTotal;
+                  formattedVal = Math.round(rawTotal / 1024) + " KB/s I/O";
+              }
+              
+              if (displayVal > 0) {
+                  procs.push({ name: key, value: formattedVal, rawObjVal: displayVal });
+              }
           }
+          
+          // Sort descending
+          procs.sort(function(a, b) { return b.rawObjVal - a.rawObjVal; });
+          
+          var results = [];
+          for (var i = 0; i < Math.min(limit, procs.length); i++) {
+              results.push({ name: procs[i].name, value: procs[i].value });
+          }
+          return results;
       } catch(e) {}
-      return null;
+      return [];
   }
 
   var ts = getTimestamp();
   var GB = 1073741824.0; 
-  var svc;
-  try {
-      svc = GetObject("winmgmts:\\\\.\\root\\cimv2");
-  } catch (e) {
-      WScript.Echo("-- ERROR: Could not connect to WMI root\\cimv2. " + e.message);
-      WScript.Quit(1);
-  }
 
   var ip = getLocalIP(svc);
 
@@ -148,8 +195,9 @@ var COL_ALRT = "timestamp, ip_address, alert_type, process_name, metric_value";
 
         // DISK ALERT
         if (usedPct >= threshDisk && enableDiskIO === "1") {
-            var topP = getTopProcess(svc, "DISK");
-            if (topP) {
+            var topProcs = getTopProcess(svc, "DISK", 1);
+            for (var k = 0; k < topProcs.length; k++) {
+                var topP = topProcs[k];
                 var sqlAlert = "INSERT INTO " + TBL_ALRT + " (" + COL_ALRT + ") VALUES " +
                   "(TO_DATE('" + ts + "','DD-MM-YYYY HH24:MI:SS'), '" + ip + "', 'DISK_IO_ON_" + dev + "', '" + topP.name + "', '" + topP.value + "');";
                 WScript.Echo(sqlAlert);
@@ -223,8 +271,9 @@ var COL_ALRT = "timestamp, ip_address, alert_type, process_name, metric_value";
 
   // SYSTEM ALERTS
   if (cpuAvg >= threshCpu) {
-      var topC = getTopProcess(svc, "CPU");
-      if (topC) {
+      var topCpuProcs = getTopProcess(svc, "CPU", 1);
+      for (var k = 0; k < topCpuProcs.length; k++) {
+          var topC = topCpuProcs[k];
           var sqlAlertC = "INSERT INTO " + TBL_ALRT + " (" + COL_ALRT + ") VALUES " +
             "(TO_DATE('" + ts + "','DD-MM-YYYY HH24:MI:SS'), '" + ip + "', 'CPU', '" + topC.name + "', '" + topC.value + "');";
           WScript.Echo(sqlAlertC);
@@ -232,8 +281,9 @@ var COL_ALRT = "timestamp, ip_address, alert_type, process_name, metric_value";
   }
 
   if (memAvg >= threshMem) {
-      var topM = getTopProcess(svc, "MEMORY");
-      if (topM) {
+      var topMemProcs = getTopProcess(svc, "MEMORY", 1);
+      for (var k = 0; k < topMemProcs.length; k++) {
+          var topM = topMemProcs[k];
           var sqlAlertM = "INSERT INTO " + TBL_ALRT + " (" + COL_ALRT + ") VALUES " +
             "(TO_DATE('" + ts + "','DD-MM-YYYY HH24:MI:SS'), '" + ip + "', 'MEMORY', '" + topM.name + "', '" + topM.value + "');";
           WScript.Echo(sqlAlertM);
