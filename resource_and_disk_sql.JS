@@ -15,9 +15,12 @@ var COL_DISK = "timestamp, ip_address, mount_point, total_size_gb, free_gb, used
 var TBL_SYS  = "monitor.system_resource";
 var COL_SYS  = "timestamp, ip_address, cpu, memory";
 
-// 3. Process Alerts Table (High Usage tracking)
-var TBL_ALRT = "PROCESS_ALERTS";
-var COL_ALRT = "timestamp, ip_address, alert_type, process_name, metric_value";
+// 3. Process Alerts Tables (High Usage tracking)
+var TBL_CPU  = "MONITOR.CPU";
+var TBL_MEM  = "MONITOR.MEMORY";
+// Note: ID was requested, but database-side auto-increment sequences naturally dictate leaving ID omitted from INSERT values.
+var COL_PROC = "TIMESTAMP, IP_ADDRESS, PID, CMD, PER";
+
 
 // =========================================================================
 
@@ -35,7 +38,7 @@ var COL_ALRT = "timestamp, ip_address, alert_type, process_name, metric_value";
   var threshDisk = args.length >= 5 ? parseFloat(args(4)) : 80.0;
   if (!isFinite(threshDisk)) threshDisk = 80.0;
 
-  var enableDiskIO = args.length >= 6 ? String(args(5)) : "1";
+
 
   function round1(x){ return Math.round(x * 10) / 10; }
   function pad(n) { return n < 10 ? "0" + n : String(n); }
@@ -101,60 +104,62 @@ var COL_ALRT = "timestamp, ip_address, alert_type, process_name, metric_value";
   function getTopProcess(svc, type, limit) {
       if (!limit) limit = 1; // Default to top 1
       try {
-          var perf = svc.ExecQuery("SELECT Name, PercentProcessorTime, WorkingSetPrivate, IODataBytesPersec FROM Win32_PerfFormattedData_PerfProc_Process");
+          var perf = svc.ExecQuery("SELECT Name, IDProcess, PercentProcessorTime, WorkingSetPrivate FROM Win32_PerfFormattedData_PerfProc_Process");
           var eProc = new Enumerator(perf);
-          var agg = {};
+          var procs = [];
 
           for (; !eProc.atEnd(); eProc.moveNext()) {
               var p = eProc.item();
               var rawName = String(p.Name || "");
               if (rawName === "_Total" || rawName === "Idle") continue;
 
-              // Group instances like "brave#1" -> "brave" to match Task Manager
-              var name = rawName;
-              var hashIdx = name.indexOf("#");
-              if (hashIdx > 0) name = name.substring(0, hashIdx);
-
+              var pid = Number(p.IDProcess);
               var rawVal = 0;
               if (type === "CPU") rawVal = Number(p.PercentProcessorTime);
               else if (type === "MEMORY") rawVal = Number(p.WorkingSetPrivate);
-              else if (type === "DISK") rawVal = Number(p.IODataBytesPersec);
+
 
               if (isFinite(rawVal) && rawVal > 0) {
-                  if (!agg[name]) agg[name] = 0;
-                  agg[name] += rawVal;
-              }
-          }
-          
-          var procs = [];
-          for (var key in agg) {
-              var rawTotal = agg[key];
-              var displayVal = 0;
-              var formattedVal = "";
-              
-              if (type === "CPU") {
-                  displayVal = Math.round(rawTotal / logicalProcs);
-                  if (displayVal <= 0) continue;
-                  formattedVal = displayVal + "%";
-              } else if (type === "MEMORY") {
-                  displayVal = Math.round((rawTotal / totalMemBytes) * 1000) / 10;
-                  formattedVal = displayVal + "%";
-              } else if (type === "DISK") {
-                  displayVal = rawTotal;
-                  formattedVal = Math.round(rawTotal / 1024) + " KB/s I/O";
-              }
-              
-              if (displayVal > 0) {
-                  procs.push({ name: key, value: formattedVal, rawObjVal: displayVal });
+                  procs.push({ name: rawName, pid: pid, rawTotal: rawVal });
               }
           }
           
           // Sort descending
-          procs.sort(function(a, b) { return b.rawObjVal - a.rawObjVal; });
+          procs.sort(function(a, b) { return b.rawTotal - a.rawTotal; });
           
           var results = [];
           for (var i = 0; i < Math.min(limit, procs.length); i++) {
-              results.push({ name: procs[i].name, value: procs[i].value });
+              var pItem = procs[i];
+              var displayVal = 0;
+              var formattedVal = "";
+              
+              if (type === "CPU") {
+                  displayVal = Math.round(pItem.rawTotal / logicalProcs);
+                  if (displayVal <= 0) displayVal = 1; // Show at least 1% if it's the top
+                  formattedVal = displayVal; // Raw number for new PER column
+              } else if (type === "MEMORY") {
+                  displayVal = Math.round((pItem.rawTotal / totalMemBytes) * 1000) / 10;
+                  formattedVal = displayVal; // Raw number for new PER column
+              }
+              
+              // Get accurate process path from Win32_Process using PID (avoids noisy CLI arguments)
+              var cmd = pItem.name;
+              try {
+                  var pQuery = svc.ExecQuery("SELECT Name, ExecutablePath FROM Win32_Process WHERE ProcessId = " + pItem.pid);
+                  var eQ = new Enumerator(pQuery);
+                  if (!eQ.atEnd()) {
+                     var pInfo = eQ.item();
+                     if (pInfo.ExecutablePath) cmd = pInfo.ExecutablePath;
+                     else if (pInfo.Name) cmd = pInfo.Name;
+                  }
+              } catch(e){}
+              
+              // Escape single quotes for Oracle SQL
+              cmd = String(cmd).replace(/'/g, "''");
+
+              if (displayVal > 0) {
+                  results.push({ name: pItem.name, pid: pItem.pid, cmd: cmd, value: formattedVal });
+              }
           }
           return results;
       } catch(e) {}
@@ -193,16 +198,7 @@ var COL_ALRT = "timestamp, ip_address, alert_type, process_name, metric_value";
           totalGB + ", " + freeGB + ", " + usedGB + ", " + usedPct + ");";
         WScript.Echo(sqlDisk);
 
-        // DISK ALERT
-        if (usedPct >= threshDisk && enableDiskIO === "1") {
-            var topProcs = getTopProcess(svc, "DISK", 1);
-            for (var k = 0; k < topProcs.length; k++) {
-                var topP = topProcs[k];
-                var sqlAlert = "INSERT INTO " + TBL_ALRT + " (" + COL_ALRT + ") VALUES " +
-                  "(TO_DATE('" + ts + "','DD-MM-YYYY HH24:MI:SS'), '" + ip + "', 'GLOBAL_TOP_DISK_IO', '" + topP.name + "', '" + topP.value + "');";
-                WScript.Echo(sqlAlert);
-            }
-        }
+
       }
   } catch (e) {
       WScript.Echo("-- ERROR querying disk usage: " + e.message);
@@ -274,8 +270,8 @@ var COL_ALRT = "timestamp, ip_address, alert_type, process_name, metric_value";
       var topCpuProcs = getTopProcess(svc, "CPU", 1);
       for (var k = 0; k < topCpuProcs.length; k++) {
           var topC = topCpuProcs[k];
-          var sqlAlertC = "INSERT INTO " + TBL_ALRT + " (" + COL_ALRT + ") VALUES " +
-            "(TO_DATE('" + ts + "','DD-MM-YYYY HH24:MI:SS'), '" + ip + "', 'CPU', '" + topC.name + "', '" + topC.value + "');";
+          var sqlAlertC = "INSERT INTO " + TBL_CPU + " (" + COL_PROC + ") VALUES " +
+            "(TO_DATE('" + ts + "','DD-MM-YYYY HH24:MI:SS'), '" + ip + "', " + topC.pid + ", '" + topC.cmd + "', " + topC.value + ");";
           WScript.Echo(sqlAlertC);
       }
   }
@@ -284,8 +280,8 @@ var COL_ALRT = "timestamp, ip_address, alert_type, process_name, metric_value";
       var topMemProcs = getTopProcess(svc, "MEMORY", 1);
       for (var k = 0; k < topMemProcs.length; k++) {
           var topM = topMemProcs[k];
-          var sqlAlertM = "INSERT INTO " + TBL_ALRT + " (" + COL_ALRT + ") VALUES " +
-            "(TO_DATE('" + ts + "','DD-MM-YYYY HH24:MI:SS'), '" + ip + "', 'MEMORY', '" + topM.name + "', '" + topM.value + "');";
+          var sqlAlertM = "INSERT INTO " + TBL_MEM + " (" + COL_PROC + ") VALUES " +
+            "(TO_DATE('" + ts + "','DD-MM-YYYY HH24:MI:SS'), '" + ip + "', " + topM.pid + ", '" + topM.cmd + "', " + topM.value + ");";
           WScript.Echo(sqlAlertM);
       }
   }

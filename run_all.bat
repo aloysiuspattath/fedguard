@@ -13,7 +13,7 @@ set "SAMPLE_COUNT=5"
 set "CPU_THRESHOLD=80"
 set "MEM_THRESHOLD=85"
 set "DISK_THRESHOLD=90"
-set "ENABLE_DISK_IO_ALERT=1"
+
 
 REM ===== 2) Paths =====
 set "BASEDIR=%~dp0"
@@ -36,8 +36,8 @@ if not exist "%JS_COLLECTOR%" (
   set "JS_OK=0"
   echo [ERROR] Missing JS Collector: %JS_COLLECTOR%
 ) else (
-  REM Arguments: [sampleCount] [driveTypeFilter] [threshCPU] [threshMem] [threshDisk] [enableDiskIO]
-  cscript //nologo "%JS_COLLECTOR%" "!SAMPLE_COUNT!" "3" "!CPU_THRESHOLD!" "!MEM_THRESHOLD!" "!DISK_THRESHOLD!" "!ENABLE_DISK_IO_ALERT!" >> "%OUTFILE%" 2>nul
+  REM Arguments: [sampleCount] [driveTypeFilter] [threshCPU] [threshMem] [threshDisk]
+  cscript //nologo "%JS_COLLECTOR%" "!SAMPLE_COUNT!" "3" "!CPU_THRESHOLD!" "!MEM_THRESHOLD!" "!DISK_THRESHOLD!" >> "%OUTFILE%" 2>nul
   if errorlevel 1 set "JS_OK=0"
 )
 
