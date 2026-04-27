@@ -111,7 +111,9 @@ var COL_PROC = "TIMESTAMP, IP_ADDRESS, PID, CMD, PER";
           for (; !eProc.atEnd(); eProc.moveNext()) {
               var p = eProc.item();
               var rawName = String(p.Name || "");
-              if (rawName === "_Total" || rawName === "Idle") continue;
+              
+              // Ignore harmless internal OS or pseudo-processes
+              if (rawName === "_Total" || rawName === "Idle" || rawName === "Memory Compression" || rawName === "System" || rawName === "Registry") continue;
 
               var pid = Number(p.IDProcess);
               var rawVal = 0;

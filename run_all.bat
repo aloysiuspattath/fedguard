@@ -10,8 +10,8 @@ REM ============================================================
 REM ===== 1) Config =====
 set "PURGE=1"
 set "SAMPLE_COUNT=5"
-set "CPU_THRESHOLD=80"
-set "MEM_THRESHOLD=85"
+set "CPU_THRESHOLD=50"
+set "MEM_THRESHOLD=80"
 set "DISK_THRESHOLD=90"
 REM Set to 1 to override CPU/MEM thresholds dynamically from Oracle DB
 REM 0 = Uses hardcoded .bat config.
